@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import anthropic
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, date as date_type
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -377,14 +377,31 @@ def render_prob_bar(label, away_abbr, home_abbr, away_pct, home_pct):
 def form_dots(form_list):
     return "".join(f'<span class="form-dot form-{"w" if r=="W" else "l"}"></span>' for r in form_list)
 
+def format_game_time(time_str: str) -> str:
+    """Convert BallDontLie status string like '7:30 pm ET' to clean display."""
+    if not time_str:
+        return ""
+    t = time_str.strip()
+    # Already a nice time string like "7:30 pm ET"
+    if any(x in t.lower() for x in ["pm", "am"]):
+        # Uppercase AM/PM and clean up
+        t = t.replace(" pm", " PM").replace(" am", " AM")
+        return t
+    return t
+
 def game_label(g):
     sc = g.get("score")
     score_str = f"  {sc['away']}–{sc['home']}" if sc else ""
+    time_str = format_game_time(g.get("time", ""))
+    time_part = f"  · {time_str}" if time_str and g["status"] == "scheduled" else ""
     if g["status"] in ("inprogress", "halftime"):
-        return f"🔴  {g['away']['abbr']} @ {g['home']['abbr']}{score_str}"
+        clk = g.get("clock", "")
+        qtr = g.get("quarter", 0)
+        live_info = f"  Q{qtr}" if qtr and not clk else (f"  Q{qtr} {clk}" if qtr else "")
+        return f"🔴  {g['away']['abbr']} @ {g['home']['abbr']}{score_str}{live_info}"
     if g["status"] == "closed":
-        return f"✅  {g['away']['abbr']} @ {g['home']['abbr']}{score_str}"
-    return f"🕐  {g['away']['abbr']} @ {g['home']['abbr']}"
+        return f"✅  {g['away']['abbr']} @ {g['home']['abbr']}{score_str}  · Final"
+    return f"🕐  {g['away']['abbr']} @ {g['home']['abbr']}{time_part}"
 
 
 # ─────────────────────────────────────────────
@@ -567,11 +584,27 @@ with col_right:
     conf_color = {"high":"#2ecc71","med":"#f0a500","low":"#888"}[pred["confidence"]]
     conf_bg    = {"high":"rgba(46,204,113,.15)","med":"rgba(240,165,0,.15)","low":"rgba(255,255,255,.06)"}[pred["confidence"]]
 
-    st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+    # Build status/time line
+    if g["status"] in ("inprogress", "halftime"):
+        clk = g.get("clock","")
+        qtr = g.get("quarter",0)
+        _status_html = f'<span style="background:rgba(231,76,60,0.2);color:#e74c3c;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;">● LIVE Q{qtr}{" "+clk if clk else ""}</span>'
+    elif g["status"] == "closed":
+        sc = g.get("score")
+        final_score = f"{sc['away']}–{sc['home']}" if sc else ""
+        _status_html = f'<span style="color:#666;font-size:12px;">Final  {final_score}</span>'
+    else:
+        _time = format_game_time(g.get("time",""))
+        _status_html = f'<span style="color:#f0a500;font-size:13px;font-weight:500;">🕐 {_time}</span>' if _time else ""
+
+    st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
         <div style="font-size:20px;font-weight:700;color:#fff;">{g['away']['abbr']} @ {g['home']['abbr']}</div>
         <span style="background:{conf_bg};color:{conf_color};border-radius:6px;padding:3px 12px;font-size:12px;font-weight:600;">{conf_label}</span>
     </div>
-    <div style="font-size:13px;color:#666;margin-bottom:12px;">{g['away']['name']} at {g['home']['name']}</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+        <span style="font-size:13px;color:#666;">{g['away']['name']} at {g['home']['name']}</span>
+        {_status_html}
+    </div>
     """, unsafe_allow_html=True)
 
     inj = g["injuries"]["home"] + g["injuries"]["away"]
