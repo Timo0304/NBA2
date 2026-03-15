@@ -567,25 +567,26 @@ def conf_badge(conf: str) -> str:
 with st.sidebar:
     st.markdown("### ⚙ Configuration")
 
+    # Always show current key status
+    sr_status = "✅ Key set" if st.session_state.sr_key else "❌ Not set"
+    ai_status = "✅ Key set" if st.session_state.ai_key else "❌ Not set"
+
     ai_input = st.text_input(
-        "Anthropic API Key",
+        f"Anthropic API Key  {ai_status}",
         value=st.session_state.ai_key,
         type="password",
         help="Required for AI deep analysis",
     )
-    if ai_input.strip() != st.session_state.ai_key:
-        st.session_state.ai_key = ai_input.strip()
-        st.rerun()
+    # Always update — don't compare, just set
+    st.session_state.ai_key = ai_input.strip()
 
     sr_input = st.text_input(
-        "SportRadar API Key",
+        f"SportRadar API Key  {sr_status}",
         value=st.session_state.sr_key,
         type="password",
         help="Required for live NBA data (trial key works)",
     )
-    if sr_input.strip() != st.session_state.sr_key:
-        st.session_state.sr_key = sr_input.strip()
-        st.rerun()
+    st.session_state.sr_key = sr_input.strip()
 
     st.markdown("---")
     st.markdown("### 📅 Date")
@@ -600,6 +601,16 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    # Test connection button
+    if st.session_state.sr_key:
+        if st.button("🔌 Test SportRadar Connection", use_container_width=True):
+            st.session_state.test_api = True
+
+    if st.button("🔄 Refresh Data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.markdown("---")
     st.markdown("### ℹ About")
     st.markdown("""
 **NBA Prediction Engine**
@@ -611,10 +622,6 @@ with st.sidebar:
 
 *Demo mode active when no API key is set.*
     """)
-
-    if st.button("🔄 Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -634,7 +641,8 @@ st.markdown("""
 # ─────────────────────────────────────────────
 
 # Demo mode when no valid SportRadar key is present
-using_demo = (st.session_state.sr_key == "")
+# NOTE: evaluated AFTER sidebar so it reads the current key value
+using_demo = (st.session_state.sr_key.strip() == "")
 
 
 def extract_stats(d):
@@ -652,21 +660,61 @@ def extract_stats(d):
     }
 
 
+# ── Test Connection block ──────────────────────────────────────────
+if st.session_state.get("test_api"):
+    st.session_state.test_api = False
+    _key = st.session_state.sr_key
+    _date = datetime.today().strftime("%Y/%m/%d")
+    with st.spinner("Testing SportRadar connection..."):
+        try:
+            _url = f"{SR_BASE}/games/{_date}/schedule.json?api_key={_key}"
+            _r = requests.get(_url, timeout=15)
+            if _r.status_code == 200:
+                _data = _r.json()
+                st.success(f"✅ Connected! Found {len(_data.get('games', []))} game(s) for today.")
+            elif _r.status_code == 401:
+                st.error("❌ 401 Unauthorized — your API key is invalid or expired.")
+            elif _r.status_code == 403:
+                st.error("❌ 403 Forbidden — trial key may not have access to this endpoint.")
+            elif _r.status_code == 429:
+                st.error("❌ 429 Rate limited — too many requests. Wait 1 minute and try again.")
+            else:
+                st.error(f"❌ HTTP {_r.status_code}: {_r.text[:300]}")
+        except Exception as _e:
+            st.error(f"❌ Connection error: {_e}")
+
 if not using_demo:
     _key     = st.session_state.sr_key
     date_str = selected_date.strftime("%Y/%m/%d")
-    raw      = fetch_daily_schedule(date_str, _key)
-    _        = fetch_live_scoreboard(_key)  # warm the live cache
 
-    # Show API debug info in an expander
-    with st.expander("🔧 API Debug Info", expanded=False):
+    # Always show debug panel expanded when key is set but failing
+    raw = fetch_daily_schedule(date_str, _key)
+    _   = fetch_live_scoreboard(_key)
+
+    _api_ok    = raw and "games" in raw
+    _api_error = raw.get("error") if isinstance(raw, dict) else None
+    _debug_open = (not _api_ok)  # auto-open if something is wrong
+
+    with st.expander("🔧 API Debug Info", expanded=_debug_open):
+        st.caption(f"Endpoint: `{SR_BASE}/games/{date_str}/schedule.json`")
+        st.caption(f"Key (last 6 chars): `...{_key[-6:] if len(_key) > 6 else _key}`")
         if raw is None:
-            st.write("API returned None (key missing or empty)")
-        elif "error" in (raw or {}):
-            st.error(f"API Error: {raw['error']}")
+            st.error("API returned None — key may be empty or missing.")
+        elif _api_error:
+            st.error(f"API Error: {_api_error}")
+            if "401" in str(_api_error):
+                st.info("💡 Invalid key — double-check you copied the full key from developer.sportradar.com")
+            elif "403" in str(_api_error):
+                st.info("💡 Forbidden — trial keys require registration at developer.sportradar.com. Make sure you selected 'NBA Official API → Trial'.")
+            elif "429" in str(_api_error):
+                st.info("💡 Rate limited — trial keys allow 1 req/sec. Click Refresh Data in 60s.")
         else:
-            st.success(f"API responded OK — {len(raw.get('games', []))} game(s) on {date_str}")
-            st.json({k: v for k, v in raw.items() if k != "games"})
+            n = len(raw.get("games", []))
+            if n == 0:
+                st.warning(f"API responded OK but 0 games on {date_str}. Try selecting a different date.")
+                st.json({k: v for k, v in raw.items() if k != "games"})
+            else:
+                st.success(f"✅ API OK — {n} game(s) found on {date_str}")
 
     games = []
     if raw and "games" in raw:
