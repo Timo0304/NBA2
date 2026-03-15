@@ -24,6 +24,10 @@ if "selected_date" not in st.session_state:
     st.session_state.selected_date = datetime.today().date()
 if "status_filter" not in st.session_state:
     st.session_state.status_filter = ["scheduled", "inprogress", "halftime"]
+if "pred_history" not in st.session_state:
+    st.session_state.pred_history = []
+if "auto_refresh" not in st.session_state:
+    st.session_state.auto_refresh = False
 
 BDL_BASE = "https://api.balldontlie.io/v1"
 
@@ -79,6 +83,19 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .divider { height:1px; background:rgba(255,255,255,0.08); margin:12px 0; }
 .live-score { font-size:28px; font-weight:700; color:#fff; letter-spacing:-1px; }
 .q-score-card { background:rgba(255,255,255,0.05); border-radius:8px; padding:8px 12px; text-align:center; }
+.live-dash { background:rgba(231,76,60,0.08); border:1px solid rgba(231,76,60,0.3); border-radius:12px; padding:16px; margin-bottom:16px; }
+.live-tscore { font-size:36px; font-weight:700; color:#fff; }
+.live-tname  { font-size:13px; color:#aaa; margin-top:2px; }
+.acc-card { border-radius:10px; padding:14px; text-align:center; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.04); }
+.acc-val  { font-size:26px; font-weight:700; }
+.acc-label { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px; }
+.acc-sub   { font-size:11px; color:#666; margin-top:3px; }
+.badge-correct { background:rgba(46,204,113,0.15); color:#2ecc71; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:600; }
+.badge-wrong   { background:rgba(231,76,60,0.15);  color:#e74c3c; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:600; }
+.badge-pending { background:rgba(240,165,0,0.15);  color:#f0a500; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:600; }
+.hist-row { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:1px solid rgba(255,255,255,0.06); font-size:13px; }
+.hist-row:last-child { border-bottom:none; }
+.live-compare { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px 16px; margin-top:10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -362,6 +379,210 @@ Cover: key storyline, biggest win factor, Q1 momentum, O/U lean & reasoning, OT 
 # HELPERS
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# PREDICTION TRACKING
+# ─────────────────────────────────────────────
+
+def record_prediction(game, pred):
+    gid = game["id"]
+    if any(p["game_id"] == gid for p in st.session_state.pred_history):
+        return
+    fav = game["home"]["abbr"] if pred["game_win"]["home"] >= pred["game_win"]["away"] else game["away"]["abbr"]
+    q1f = game["home"]["abbr"] if pred["q1"]["home"] >= pred["q1"]["away"] else game["away"]["abbr"]
+    st.session_state.pred_history.append({
+        "game_id": gid,
+        "matchup": f'{game["away"]["abbr"]} @ {game["home"]["abbr"]}',
+        "date": str(st.session_state.selected_date),
+        "predicted_winner": fav,
+        "predicted_winner_pct": max(pred["game_win"]["home"], pred["game_win"]["away"]),
+        "actual_winner": None,
+        "ou_line": pred["ou_line"],
+        "predicted_total": pred["total_proj"],
+        "predicted_over": pred["over_pct"] >= 50,
+        "actual_total": None,
+        "q1_pred": q1f,
+        "status": "pending",
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+
+def update_prediction_results(games):
+    for game in games:
+        if game["status"] != "closed":
+            continue
+        sc = game.get("score")
+        if not sc:
+            continue
+        actual_winner = game["home"]["abbr"] if sc["home"] > sc["away"] else game["away"]["abbr"]
+        actual_total = sc["home"] + sc["away"]
+        for p in st.session_state.pred_history:
+            if p["game_id"] == game["id"] and p["status"] == "pending":
+                p["actual_winner"] = actual_winner
+                p["actual_total"] = actual_total
+                p["status"] = "settled"
+                p["winner_correct"] = p["predicted_winner"] == actual_winner
+                p["ou_correct"] = (actual_total > p["ou_line"]) == p["predicted_over"]
+
+def get_accuracy_stats():
+    settled = [p for p in st.session_state.pred_history if p["status"] == "settled"]
+    pending = [p for p in st.session_state.pred_history if p["status"] == "pending"]
+    if not settled:
+        return {"total": len(st.session_state.pred_history), "settled": 0, "pending": len(pending),
+                "winner_pct": None, "ou_pct": None, "correct_winners": 0, "correct_ou": 0}
+    cw = sum(1 for p in settled if p.get("winner_correct"))
+    co = sum(1 for p in settled if p.get("ou_correct"))
+    return {"total": len(st.session_state.pred_history), "settled": len(settled), "pending": len(pending),
+            "winner_pct": round(cw / len(settled) * 100), "ou_pct": round(co / len(settled) * 100),
+            "correct_winners": cw, "correct_ou": co}
+
+def render_accuracy_dashboard():
+    acc = get_accuracy_stats()
+    if acc["total"] == 0:
+        st.info("No predictions tracked yet. Click **Track This Prediction** on any game to start building your record.", icon="📊")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    for col, val, label, sub in [
+        (c1, acc["total"], "Tracked", f'{acc["settled"]} settled'),
+        (c2, f'{acc["winner_pct"]}%' if acc["winner_pct"] is not None else "—", "Winner Acc", f'{acc["correct_winners"]}/{acc["settled"]}'),
+        (c3, f'{acc["ou_pct"]}%' if acc["ou_pct"] is not None else "—", "O/U Acc", f'{acc["correct_ou"]}/{acc["settled"]}'),
+        (c4, acc["pending"], "Pending", "awaiting results"),
+    ]:
+        color = ""
+        if isinstance(val, str) and "%" in val:
+            pct = int(val.replace("%", ""))
+            color = "color:#2ecc71;" if pct >= 60 else ("color:#f0a500;" if pct >= 45 else "color:#e74c3c;")
+        with col:
+            st.markdown(f'<div class="acc-card"><div class="acc-label">{label}</div>'
+                        f'<div class="acc-val" style="{color}">{val}</div>'
+                        f'<div class="acc-sub">{sub}</div></div>', unsafe_allow_html=True)
+
+    if st.session_state.pred_history:
+        st.markdown("")
+        with st.expander("📋 Prediction History", expanded=False):
+            rows = []
+            for p in reversed(st.session_state.pred_history):
+                if p["status"] == "settled":
+                    wc = "✓" if p.get("winner_correct") else "✗"
+                    oc = "✓" if p.get("ou_correct") else "✗"
+                    result = f'{wc} {p["actual_winner"]}'
+                    ou_res = f'{oc} {"Over" if p["actual_total"] > p["ou_line"] else "Under"} ({p["actual_total"]} pts)'
+                else:
+                    result = "Pending"
+                    ou_res = f'Line: {p["ou_line"]}'
+                rows.append({
+                    "Date": p["date"], "Matchup": p["matchup"],
+                    "Predicted": f'{p["predicted_winner"]} ({p["predicted_winner_pct"]}%)',
+                    "Result": result, "O/U": ou_res,
+                })
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        if st.button("🗑 Clear History", key="clear_hist"):
+            st.session_state.pred_history = []
+            st.rerun()
+
+def render_live_game_dashboard(game, pred):
+    sc = game.get("score") or {"home": 0, "away": 0}
+    qtr = game.get("quarter", 0)
+    clk = game.get("clock", "")
+    is_ht = game["status"] == "halftime"
+    clock_display = "HALFTIME" if is_ht else (f"Q{qtr}  {clk}" if clk else f"Q{qtr}")
+
+    st.markdown(f'''<div class="live-dash">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+            <div style="text-align:left;">
+                <div class="live-tscore">{sc["away"]}</div>
+                <div class="live-tname">{game["away"]["name"]}</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:11px;color:#e74c3c;font-weight:600;margin-bottom:6px;">● LIVE</div>
+                <div style="font-size:16px;color:#e74c3c;font-weight:700;">{clock_display}</div>
+            </div>
+            <div style="text-align:right;">
+                <div class="live-tscore">{sc["home"]}</div>
+                <div class="live-tname">{game["home"]["name"]}</div>
+            </div>
+        </div>
+    </div>''', unsafe_allow_html=True)
+
+    if game.get("q_scores"):
+        st.markdown('<div class="section-header">Quarter Breakdown</div>', unsafe_allow_html=True)
+        ncols = len(game["q_scores"]) + 1
+        qcols = st.columns(ncols)
+        for i, (qn, qs) in enumerate(sorted(game["q_scores"].items())):
+            ldr = game["away"]["abbr"] if qs["away"] > qs["home"] else (game["home"]["abbr"] if qs["home"] > qs["away"] else "TIE")
+            lc = "#2ecc71" if ldr == game["away"]["abbr"] else ("#3498db" if ldr == game["home"]["abbr"] else "#888")
+            with qcols[i]:
+                st.markdown(f'<div class="q-score-card"><div style="font-size:11px;color:#888;">Q{qn}</div>'
+                            f'<div style="font-size:16px;font-weight:700;color:#fff;">{qs["away"]}–{qs["home"]}</div>'
+                            f'<div style="font-size:11px;color:{lc};font-weight:600;">{ldr}</div></div>', unsafe_allow_html=True)
+        with qcols[-1]:
+            st.markdown(f'<div class="q-score-card" style="border:1px solid rgba(231,76,60,0.3);">'
+                        f'<div style="font-size:11px;color:#e74c3c;">TOTAL</div>'
+                        f'<div style="font-size:16px;font-weight:700;color:#fff;">{sc["away"]}–{sc["home"]}</div>'
+                        f'<div style="font-size:11px;color:#aaa;">Live</div></div>', unsafe_allow_html=True)
+
+    live_total = sc["home"] + sc["away"]
+    live_leader = game["away"]["abbr"] if sc["away"] > sc["home"] else (game["home"]["abbr"] if sc["home"] > sc["away"] else "TIE")
+    pred_winner = game["home"]["abbr"] if pred["game_win"]["home"] >= pred["game_win"]["away"] else game["away"]["abbr"]
+    qtrs_played = 2 if is_ht else max(1, qtr)
+    pace_mult = 4 / qtrs_played if qtrs_played > 0 else 1
+    proj_final = round(live_total * min(pace_mult, 4))
+    pts_needed = max(0, round(pred["ou_line"] - live_total))
+    match_pred = live_leader == pred_winner
+
+    st.markdown('<div class="section-header">Live vs Pre-Game Predictions</div>', unsafe_allow_html=True)
+    st.markdown('<div class="live-compare">', unsafe_allow_html=True)
+    for lbl, val, note, col in [
+        ("Current leader",   live_leader,
+         f'{"✓ Matches" if match_pred else "✗ Differs"} pre-game pick ({pred_winner})',
+         "#2ecc71" if match_pred else "#e74c3c"),
+        ("Live total",       f"{live_total} pts",
+         f"Line {pred['ou_line']} · Proj finish ~{proj_final} pts",
+         "#f0a500" if abs(proj_final - pred['ou_line']) < 8 else ("#2ecc71" if proj_final > pred['ou_line'] else "#aaa")),
+        ("O/U pace",         f'{"Over" if proj_final > pred["ou_line"] else "Under"} pace',
+         f"Need {pts_needed} more pts to hit over in {4 - qtrs_played} qtr(s)",
+         "#2ecc71" if proj_final > pred["ou_line"] else "#aaa"),
+        ("Pre-game pick",    f'{pred_winner} ({max(pred["game_win"]["home"],pred["game_win"]["away"])}%)',
+         "Original win probability", "#3498db"),
+    ]:
+        st.markdown(f'<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;">'
+                    f'<span style="color:#888;width:120px;">{lbl}</span>'
+                    f'<span style="font-weight:600;color:{col};">{val}</span>'
+                    f'<span style="color:#555;font-size:12px;text-align:right;max-width:200px;">{note}</span>'
+                    f'</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def get_live_ai_analysis(game, pred):
+    sc = game.get("score") or {"home": 0, "away": 0}
+    live_total = sc["home"] + sc["away"]
+    qtr = game.get("quarter", 0)
+    clk = game.get("clock", "")
+    is_ht = game["status"] == "halftime"
+    qtrs_played = 2 if is_ht else max(1, qtr)
+    proj_final = round(live_total * (4 / qtrs_played))
+    live_leader = game["away"]["abbr"] if sc["away"] > sc["home"] else (game["home"]["abbr"] if sc["home"] > sc["away"] else "tied")
+    pred_winner = game["home"]["abbr"] if pred["game_win"]["home"] >= pred["game_win"]["away"] else game["away"]["abbr"]
+    inj = game["injuries"]["home"] + game["injuries"]["away"]
+
+    prompt = f"""You are an elite NBA analyst giving LIVE in-game analysis.
+
+LIVE: {game['away']['name']} {sc['away']} — {game['home']['name']} {sc['home']}  ({'Halftime' if is_ht else f'Q{qtr} {clk}'})
+Current leader: {live_leader} | Total scored: {live_total} pts | Projected final: ~{proj_final} pts
+O/U line: {pred['ou_line']} | Pre-game predicted winner: {pred_winner} ({max(pred['game_win']['home'],pred['game_win']['away'])}%)
+{game['away']['abbr']}: OffRtg {game['stats']['away']['ortg']}, DefRtg {game['stats']['away']['drtg']}, Pace {game['stats']['away']['pace']}
+{game['home']['abbr']}: OffRtg {game['stats']['home']['ortg']}, DefRtg {game['stats']['home']['drtg']}, Pace {game['stats']['home']['pace']}
+Injuries: {', '.join(inj) if inj else 'None'}
+
+Give 5-6 sharp sentences: (1) current momentum and who controls the game, (2) how the live score compares to pre-game predictions — on track or upset forming, (3) O/U trajectory, (4) key adjustments needed for trailing team, (5) revised final result outlook. Be direct, specific, no fluff."""
+
+    try:
+        client = anthropic.Anthropic(api_key=st.session_state.ai_key)
+        msg = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=800,
+                                     messages=[{"role": "user", "content": prompt}])
+        return msg.content[0].text
+    except Exception as e:
+        return f"Analysis error: {e}"
+
+
+
 def render_prob_bar(label, away_abbr, home_abbr, away_pct, home_pct):
     aw, hw = max(6, away_pct), max(6, home_pct)
     st.markdown(f"""<div class="prob-container">
@@ -475,7 +696,11 @@ with st.sidebar:
                 else:
                     st.success(f"✅ Connected! {len(_r.get('data', []))} game(s) today.")
 
-    if st.button("🔄 Refresh Data", use_container_width=True):
+    auto_ref = st.toggle("⚡ Auto-refresh (live games)", value=st.session_state.auto_refresh)
+    if auto_ref != st.session_state.auto_refresh:
+        st.session_state.auto_refresh = auto_ref
+
+    if st.button("🔄 Refresh Now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -491,6 +716,24 @@ st.markdown("""<div class="main-header">
     <h1>🏀 NBA Prediction Engine</h1>
     <p>Live data · Quarter-by-quarter predictions · Over/Under · First-to-reach · AI-powered deep analysis</p>
 </div>""", unsafe_allow_html=True)
+
+# Auto-refresh for live games
+if st.session_state.auto_refresh:
+    live_games_exist = False
+    if not (st.session_state.bdl_key == ""):
+        _check_date = st.session_state.selected_date.strftime("%Y-%m-%d")
+        _check_raw = fetch_games_for_date(_check_date, st.session_state.bdl_key)
+        if _check_raw and "data" in _check_raw:
+            live_games_exist = any(
+                normalize_bdl_game(g_)["status"] in ("inprogress","halftime")
+                for g_ in _check_raw.get("data", [])
+            )
+    if live_games_exist:
+        import time as _time
+        st.toast("⚡ Live game detected — auto-refreshing every 60s", icon="🔴")
+        _time.sleep(60)
+        st.cache_data.clear()
+        st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -626,17 +869,9 @@ with col_right:
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # LIVE Q SCORES
-    if g["status"] in ("inprogress","halftime") and g["q_scores"]:
-        st.markdown('<div class="section-header">Live Quarter Scores</div>', unsafe_allow_html=True)
-        qc = st.columns(len(g["q_scores"]))
-        for i, (qn, qs) in enumerate(sorted(g["q_scores"].items())):
-            w = g["away"]["abbr"] if qs["away"] > qs["home"] else (g["home"]["abbr"] if qs["home"] > qs["away"] else "TIE")
-            wc = "#2ecc71" if w == g["away"]["abbr"] else ("#3498db" if w == g["home"]["abbr"] else "#888")
-            with qc[i]:
-                st.markdown(f'<div class="q-score-card"><div style="font-size:11px;color:#888;">Q{qn}</div>'
-                            f'<div style="font-size:18px;font-weight:700;color:#fff;">{qs["away"]}–{qs["home"]}</div>'
-                            f'<div style="font-size:11px;color:{wc};font-weight:600;">{w}</div></div>', unsafe_allow_html=True)
+    # LIVE GAME DASHBOARD — full scoreboard + prediction comparison
+    if g["status"] in ("inprogress", "halftime"):
+        render_live_game_dashboard(g, pred)
 
     # WIN PROB
     st.markdown('<div class="section-header">Win Probability</div>', unsafe_allow_html=True)
@@ -722,24 +957,52 @@ with col_right:
     for lbl, qp in q_data:
         render_prob_bar(lbl, g["away"]["abbr"], g["home"]["abbr"], qp["away"], qp["home"])
 
-    # AI
+    # AI ANALYSIS — live-aware
     st.markdown("")
-    st.markdown('<div class="section-header">🤖 AI Deep Analysis</div>', unsafe_allow_html=True)
+    is_live = g["status"] in ("inprogress", "halftime")
+    ai_section_label = "🔴 Live AI Analysis" if is_live else "🤖 AI Analysis"
+    st.markdown(f'<div class="section-header">{ai_section_label}</div>', unsafe_allow_html=True)
+
     if not st.session_state.ai_key:
         st.caption("Add your Anthropic API key in the sidebar to enable AI analysis.")
-    elif st.button("Generate AI Analysis ▶", type="primary", use_container_width=True):
-        with st.spinner("Claude is analyzing the matchup..."):
-            analysis = get_ai_analysis(g, pred)
-        st.session_state[f"ai_{g['id']}"] = analysis
+    else:
+        btn_label = "🔴 Get Live Analysis ▶" if is_live else "Generate AI Analysis ▶"
+        if st.button(btn_label, type="primary", use_container_width=True, key=f"ai_btn_{g['id']}"):
+            with st.spinner("Claude is analyzing..." if not is_live else "Claude is analyzing the live game..."):
+                if is_live:
+                    analysis = get_live_ai_analysis(g, pred)
+                else:
+                    analysis = get_ai_analysis(g, pred)
+            st.session_state[f"ai_{g['id']}"] = analysis
 
-    ai_cache_key = f"ai_{g['id']}"
-    if ai_cache_key in st.session_state:
-        cached = st.session_state[ai_cache_key]
-        st.markdown(f'<div class="ai-box">{cached}</div>', unsafe_allow_html=True)
+        ai_cache_key = f"ai_{g['id']}"
+        if ai_cache_key in st.session_state:
+            cached = st.session_state[ai_cache_key]
+            st.markdown(f'<div class="ai-box">{cached}</div>', unsafe_allow_html=True)
 
-    # SUMMARY TABLE
+    # TRACK PREDICTION BUTTON
+    st.markdown("")
+    track_key = f"tracked_{g['id']}"
+    already_tracked = any(p["game_id"] == g["id"] for p in st.session_state.pred_history)
+    if already_tracked:
+        st.success("✓ Prediction tracked — results will auto-update when game finishes.")
+    elif g["status"] != "closed":
+        if st.button("📊 Track This Prediction", use_container_width=True, key=track_key):
+            record_prediction(g, pred)
+            st.success("Prediction saved! Results will update when the game finishes.")
+            st.rerun()
+
+    # SUMMARY TABLE + ACCURACY
     st.markdown("---")
-    st.markdown("#### 📊 All Games — Prediction Summary")
+
+    # Auto-update settled predictions
+    update_prediction_results(games)
+
+    st.markdown("#### 📊 Prediction Accuracy Tracker")
+    render_accuracy_dashboard()
+
+    st.markdown("")
+    st.markdown("#### 🗓 All Games — Prediction Summary")
     rows = []
     for gg in games:
         pp  = calculate_predictions(gg)
