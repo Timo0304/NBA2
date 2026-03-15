@@ -20,6 +20,10 @@ if "bdl_key" not in st.session_state:
     st.session_state.bdl_key = _get_secret("BALLDONTLIE_API_KEY")
 if "ai_key" not in st.session_state:
     st.session_state.ai_key = _get_secret("ANTHROPIC_API_KEY")
+if "selected_date" not in st.session_state:
+    st.session_state.selected_date = datetime.today().date()
+if "status_filter" not in st.session_state:
+    st.session_state.status_filter = ["scheduled", "inprogress", "halftime"]
 
 BDL_BASE = "https://api.balldontlie.io/v1"
 
@@ -404,12 +408,42 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 📅 Date")
-    selected_date = st.date_input("Select date", value=datetime.today())
+    new_date = st.date_input("Select date", value=st.session_state.selected_date)
+    if new_date != st.session_state.selected_date:
+        st.session_state.selected_date = new_date
+        st.cache_data.clear()   # clear cache so new date fetches fresh data
+        st.rerun()
+
+    # Quick date jump buttons
+    col_d1, col_d2, col_d3 = st.columns(3)
+    with col_d1:
+        if st.button("Yesterday", use_container_width=True):
+            st.session_state.selected_date = (datetime.today() - timedelta(days=1)).date()
+            st.cache_data.clear()
+            st.rerun()
+    with col_d2:
+        if st.button("Today", use_container_width=True):
+            st.session_state.selected_date = datetime.today().date()
+            st.cache_data.clear()
+            st.rerun()
+    with col_d3:
+        if st.button("Tomorrow", use_container_width=True):
+            st.session_state.selected_date = (datetime.today() + timedelta(days=1)).date()
+            st.cache_data.clear()
+            st.rerun()
 
     st.markdown("---")
     st.markdown("### 🔍 Filters")
-    status_filter = st.multiselect("Game status", ["scheduled","inprogress","halftime","closed"],
-                                    default=["scheduled","inprogress","halftime"])
+    new_filter = st.multiselect(
+        "Game status",
+        ["scheduled", "inprogress", "halftime", "closed"],
+        default=st.session_state.status_filter,
+        key="filter_widget"
+    )
+    if new_filter != st.session_state.status_filter:
+        st.session_state.status_filter = new_filter
+        st.rerun()
+    status_filter = st.session_state.status_filter
 
     st.markdown("---")
     if st.session_state.bdl_key:
@@ -447,10 +481,11 @@ st.markdown("""<div class="main-header">
 # ─────────────────────────────────────────────
 
 using_demo = (st.session_state.bdl_key == "")
-games = []
+all_games = []   # unfiltered
+games = []       # filtered
 
 if not using_demo:
-    date_str = selected_date.strftime("%Y-%m-%d")
+    date_str = st.session_state.selected_date.strftime("%Y-%m-%d")
     raw = fetch_games_for_date(date_str, st.session_state.bdl_key)
 
     if raw and "error" in raw:
@@ -458,14 +493,22 @@ if not using_demo:
         using_demo = True
     elif raw and "data" in raw:
         for g in raw["data"]:
-            game = normalize_bdl_game(g)
-            if not status_filter or game["status"] in status_filter:
-                games.append(game)
-        if not games:
-            n = len(raw["data"])
-            msg = f"No games on {date_str} match your filter." if n > 0 else f"No games scheduled on {date_str}."
-            st.info(msg + " Showing demo data.")
+            all_games.append(normalize_bdl_game(g))
+
+        # Apply filter — if nothing matches, show ALL games with a notice
+        if status_filter:
+            games = [g for g in all_games if g["status"] in status_filter]
+        else:
+            games = list(all_games)
+
+        if not all_games:
+            st.warning(f"No games found on **{date_str}**. Try a different date.")
             using_demo = True
+        elif not games:
+            # Filter excluded everything — show all and warn
+            st.info(f"No **{', '.join(status_filter)}** games on {date_str}. "
+                    f"Showing all {len(all_games)} game(s) instead.")
+            games = list(all_games)
     else:
         using_demo = True
 
