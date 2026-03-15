@@ -9,14 +9,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─────────────────────────────────────────────
-# CONFIG
+# CONFIG — use session_state so sidebar inputs
+# are visible everywhere in the same run cycle
 # ─────────────────────────────────────────────
-SPORTRADAR_KEY = os.getenv("SPORTRADAR_API_KEY", "")
-ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+def _get_secret(key: str) -> str:
+    """Read from st.secrets (Streamlit Cloud) then .env, then empty string."""
+    try:
+        return st.secrets.get(key, "").strip()
+    except Exception:
+        pass
+    return os.getenv(key, "").strip()
 
-SR_BASE        = "https://api.sportradar.com/nba/trial/v8/en"
-SEASON_YEAR    = 2025
-SEASON_TYPE    = "REG"
+if "sr_key" not in st.session_state:
+    st.session_state.sr_key = _get_secret("SPORTRADAR_API_KEY")
+if "ai_key" not in st.session_state:
+    st.session_state.ai_key = _get_secret("ANTHROPIC_API_KEY")
+
+SR_BASE     = "https://api.sportradar.com/nba/trial/v8/en"
+SEASON_YEAR = 2025
+SEASON_TYPE = "REG"
 
 st.set_page_config(
     page_title="NBA Prediction Engine",
@@ -176,40 +187,42 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 # ─────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
-def fetch_daily_schedule(date_str: str):
+def fetch_daily_schedule(date_str: str, api_key: str):
     """Fetch games for a given date (YYYY/MM/DD)."""
-    if not SPORTRADAR_KEY:
+    if not api_key:
         return None
-    url = f"{SR_BASE}/games/{date_str}/schedule.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/games/{date_str}/schedule.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
         return r.json()
     except Exception as e:
         return {"error": str(e)}
 
 
 @st.cache_data(ttl=30)
-def fetch_live_scoreboard():
+def fetch_live_scoreboard(api_key: str):
     """Fetch today's live/scheduled scoreboard."""
-    if not SPORTRADAR_KEY:
+    if not api_key:
         return None
-    url = f"{SR_BASE}/games/today/schedule.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/games/today/schedule.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
         return r.json()
     except Exception as e:
         return {"error": str(e)}
 
 
 @st.cache_data(ttl=300)
-def fetch_team_profile(team_id: str):
-    if not SPORTRADAR_KEY:
+def fetch_team_profile(team_id: str, api_key: str):
+    if not api_key:
         return None
-    url = f"{SR_BASE}/teams/{team_id}/profile.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/teams/{team_id}/profile.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -217,12 +230,12 @@ def fetch_team_profile(team_id: str):
 
 
 @st.cache_data(ttl=120)
-def fetch_game_boxscore(game_id: str):
-    if not SPORTRADAR_KEY:
+def fetch_game_boxscore(game_id: str, api_key: str):
+    if not api_key:
         return None
-    url = f"{SR_BASE}/games/{game_id}/boxscore.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/games/{game_id}/boxscore.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -230,12 +243,12 @@ def fetch_game_boxscore(game_id: str):
 
 
 @st.cache_data(ttl=600)
-def fetch_standings():
-    if not SPORTRADAR_KEY:
+def fetch_standings(api_key: str):
+    if not api_key:
         return None
-    url = f"{SR_BASE}/seasons/{SEASON_YEAR}/{SEASON_TYPE}/standings.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/seasons/{SEASON_YEAR}/{SEASON_TYPE}/standings.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -243,12 +256,12 @@ def fetch_standings():
 
 
 @st.cache_data(ttl=600)
-def fetch_team_season_stats(team_id: str):
-    if not SPORTRADAR_KEY:
+def fetch_team_season_stats(team_id: str, api_key: str):
+    if not api_key:
         return None
-    url = f"{SR_BASE}/seasons/{SEASON_YEAR}/{SEASON_TYPE}/teams/{team_id}/statistics.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/seasons/{SEASON_YEAR}/{SEASON_TYPE}/teams/{team_id}/statistics.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -256,13 +269,13 @@ def fetch_team_season_stats(team_id: str):
 
 
 @st.cache_data(ttl=600)
-def fetch_h2h(team_id_home: str, team_id_away: str):
+def fetch_h2h(team_id_home: str, team_id_away: str, api_key: str):
     """Head-to-head from team schedule."""
-    if not SPORTRADAR_KEY:
+    if not api_key:
         return None
-    url = f"{SR_BASE}/teams/{team_id_home}/versus/{team_id_away}/matches.json?api_key={SPORTRADAR_KEY}"
+    url = f"{SR_BASE}/teams/{team_id_home}/versus/{team_id_away}/matches.json?api_key={api_key}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -478,11 +491,11 @@ def calculate_predictions(game: dict) -> dict:
 # ─────────────────────────────────────────────
 
 def get_ai_analysis(game: dict, pred: dict) -> str:
-    if not ANTHROPIC_KEY:
+    if not st.session_state.ai_key:
         return ("⚠ No Anthropic API key set. Add ANTHROPIC_API_KEY to your .env file "
                 "or Streamlit secrets to enable AI analysis.")
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        client = anthropic.Anthropic(api_key=st.session_state.ai_key)
 
         injuries_all = game["injuries"]["home"] + game["injuries"]["away"]
         injury_str   = ", ".join(injuries_all) if injuries_all else "None reported"
@@ -554,19 +567,25 @@ def conf_badge(conf: str) -> str:
 with st.sidebar:
     st.markdown("### ⚙ Configuration")
 
-    api_key_input = st.text_input(
-        "Anthropic API Key", value=ANTHROPIC_KEY, type="password",
-        help="Required for AI deep analysis"
+    ai_input = st.text_input(
+        "Anthropic API Key",
+        value=st.session_state.ai_key,
+        type="password",
+        help="Required for AI deep analysis",
     )
-    if api_key_input:
-        ANTHROPIC_KEY = api_key_input
+    if ai_input.strip() != st.session_state.ai_key:
+        st.session_state.ai_key = ai_input.strip()
+        st.rerun()
 
-    sr_key_input = st.text_input(
-        "SportRadar API Key", value=SPORTRADAR_KEY, type="password",
-        help="Required for live NBA data (trial key works)"
+    sr_input = st.text_input(
+        "SportRadar API Key",
+        value=st.session_state.sr_key,
+        type="password",
+        help="Required for live NBA data (trial key works)",
     )
-    if sr_key_input:
-        SPORTRADAR_KEY = sr_key_input
+    if sr_input.strip() != st.session_state.sr_key:
+        st.session_state.sr_key = sr_input.strip()
+        st.rerun()
 
     st.markdown("---")
     st.markdown("### 📅 Date")
@@ -614,78 +633,108 @@ st.markdown("""
 # LOAD GAMES
 # ─────────────────────────────────────────────
 
-using_demo = not SPORTRADAR_KEY
+# Demo mode when no valid SportRadar key is present
+using_demo = (st.session_state.sr_key == "")
+
+
+def extract_stats(d):
+    own = d.get("own_record", {}).get("total", {})
+    return {
+        "fg_pct":    round(own.get("field_goals_pct", 45.0), 1),
+        "fg3_pct":   round(own.get("three_points_pct", 36.0), 1),
+        "reb":       round(own.get("rebounds", 44), 1),
+        "to":        round(own.get("turnovers", 13), 1),
+        "ortg":      round(own.get("offensive_rating", 112), 1),
+        "drtg":      round(own.get("defensive_rating", 112), 1),
+        "bench_pts": round(own.get("bench_points", 36), 1),
+        "paint_pts": round(own.get("points_in_paint", 46), 1),
+        "pace":      round(own.get("pace", 100.0), 1),
+    }
+
 
 if not using_demo:
-    date_str   = selected_date.strftime("%Y/%m/%d")
-    raw        = fetch_daily_schedule(date_str)
-    live_raw   = fetch_live_scoreboard()
+    _key     = st.session_state.sr_key
+    date_str = selected_date.strftime("%Y/%m/%d")
+    raw      = fetch_daily_schedule(date_str, _key)
+    _        = fetch_live_scoreboard(_key)  # warm the live cache
+
+    # Show API debug info in an expander
+    with st.expander("🔧 API Debug Info", expanded=False):
+        if raw is None:
+            st.write("API returned None (key missing or empty)")
+        elif "error" in (raw or {}):
+            st.error(f"API Error: {raw['error']}")
+        else:
+            st.success(f"API responded OK — {len(raw.get('games', []))} game(s) on {date_str}")
+            st.json({k: v for k, v in raw.items() if k != "games"})
 
     games = []
     if raw and "games" in raw:
         for g in raw.get("games", []):
-            status   = g.get("status", "scheduled").lower()
-            if status not in status_filter:
+            status  = g.get("status", "scheduled").lower()
+            if status_filter and status not in status_filter:
                 continue
             home_id  = g.get("home", {}).get("id", "")
             away_id  = g.get("away", {}).get("id", "")
-            home_sts = fetch_team_season_stats(home_id) or {}
-            away_sts = fetch_team_season_stats(away_id) or {}
-
-            def extract_stats(d):
-                own = d.get("own_record", {}).get("total", {})
-                return {
-                    "fg_pct":    round(own.get("field_goals_pct", 45.0), 1),
-                    "fg3_pct":   round(own.get("three_points_pct", 36.0), 1),
-                    "reb":       round(own.get("rebounds", 44), 1),
-                    "to":        round(own.get("turnovers", 13), 1),
-                    "ortg":      round(own.get("offensive_rating", 112), 1),
-                    "drtg":      round(own.get("defensive_rating", 112), 1),
-                    "bench_pts": round(own.get("bench_points", 36), 1),
-                    "paint_pts": round(own.get("points_in_paint", 46), 1),
-                    "pace":      round(own.get("pace", 100.0), 1),
-                }
+            home_sts = fetch_team_season_stats(home_id, _key) or {}
+            away_sts = fetch_team_season_stats(away_id, _key) or {}
 
             q_scores = {}
-            box = fetch_game_boxscore(g.get("id","")) or {}
+            box = fetch_game_boxscore(g.get("id", ""), _key) or {}
             for period in box.get("periods", []):
-                pnum = str(period.get("number",""))
+                pnum = str(period.get("number", ""))
                 q_scores[pnum] = {
                     "home": period.get("home_points", 0),
-                    "away": period.get("away_points", 0)
+                    "away": period.get("away_points", 0),
                 }
 
-            # Win probability
             probs = g.get("win_probability", [{}])
             home_prob = 50
             if isinstance(probs, list) and probs:
-                for p in probs:
-                    if p.get("home", True):
-                        home_prob = round(p.get("probability", 0.5) * 100)
-
-            score_home = g.get("home_points", 0)
-            score_away = g.get("away_points", 0)
+                for p_item in probs:
+                    if p_item.get("home", True):
+                        home_prob = round(p_item.get("probability", 0.5) * 100)
 
             games.append({
-                "id":       g.get("id"),
-                "status":   status,
-                "quarter":  g.get("quarter", 1),
-                "clock":    g.get("clock", ""),
-                "home":     {"abbr": g.get("home",{}).get("alias","HME"), "name": g.get("home",{}).get("name","Home"), "id": home_id},
-                "away":     {"abbr": g.get("away",{}).get("alias","AWY"), "name": g.get("away",{}).get("name","Away"), "id": away_id},
-                "score":    {"home": score_home, "away": score_away},
+                "id":      g.get("id"),
+                "status":  status,
+                "quarter": g.get("quarter", 1),
+                "clock":   g.get("clock", ""),
+                "home": {
+                    "abbr": g.get("home", {}).get("alias", "HME"),
+                    "name": g.get("home", {}).get("name", "Home"),
+                    "id":   home_id,
+                },
+                "away": {
+                    "abbr": g.get("away", {}).get("alias", "AWY"),
+                    "name": g.get("away", {}).get("name", "Away"),
+                    "id":   away_id,
+                },
+                "score":    {"home": g.get("home_points", 0), "away": g.get("away_points", 0)},
                 "q_scores": q_scores,
                 "win_prob": {"home": home_prob, "away": 100 - home_prob},
                 "time":     g.get("scheduled", "TBD"),
                 "stats":    {"home": extract_stats(home_sts), "away": extract_stats(away_sts)},
-                "form":     {"home": ["W","W","L","W","W"], "away": ["W","L","W","W","W"]},  # from standings
+                "form":     {"home": ["W","W","L","W","W"], "away": ["W","L","W","W","W"]},
                 "injuries": {"home": [], "away": []},
                 "ou_line":  225.0,
                 "top_players": {"home": [], "away": []},
             })
-else:
-    games = DEMO_GAMES
-    st.info("🎮 **Demo mode** — Showing sample data. Add your SportRadar API key in the sidebar for live NBA data.", icon="ℹ")
+
+    # If the API came back empty (wrong date, rate-limit, etc.) fall back to demo
+    if not games:
+        using_demo = True
+
+if using_demo:
+    active_filters = status_filter if status_filter else ["scheduled", "inprogress", "halftime"]
+    games = [g for g in DEMO_GAMES if g["status"] in active_filters]
+    if not games:          # edge-case: filter excluded everything
+        games = list(DEMO_GAMES)
+    st.info(
+        "**Demo mode** — showing built-in sample matchups. "
+        "Add your SportRadar API key in the sidebar to load live NBA data.",
+        icon="ℹ️",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -693,7 +742,7 @@ else:
 # ─────────────────────────────────────────────
 
 if not games:
-    st.warning("No games found for the selected date. Try a different date or check your API key.")
+    st.warning("No games available. Try a different date or adjust the status filter.")
     st.stop()
 
 # Build game options
